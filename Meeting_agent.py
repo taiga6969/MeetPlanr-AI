@@ -20,6 +20,8 @@ def initialize_session_state():
     defaults = {
         "setup": None,
         "google_api_key": "",
+        "primary_model": "gemini-1.5-flash",
+        "fallback_model": "gemini-1.5-pro",
         "prepared": False,
         "vectorstore": None,
         "context_analysis": None,
@@ -312,6 +314,30 @@ def main():
             st.session_state["google_api_key"] = google_api_key
             os.environ["GOOGLE_API_KEY"] = google_api_key
         
+        # Model Configuration
+        with st.expander("LLM Configuration"):
+            primary_model = st.selectbox(
+                "Primary Model",
+                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+                index=0,
+                help="Primary model for CrewAI analysis"
+            )
+            if "primary_model" not in st.session_state:
+                st.session_state["primary_model"] = primary_model
+            elif primary_model != st.session_state["primary_model"]:
+                st.session_state["primary_model"] = primary_model
+            
+            fallback_model = st.selectbox(
+                "Fallback Model",
+                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+                index=1 if len(["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]) > 1 else 0,
+                help="Fallback model if primary fails"
+            )
+            if "fallback_model" not in st.session_state:
+                st.session_state["fallback_model"] = fallback_model
+            elif fallback_model != st.session_state["fallback_model"]:
+                st.session_state["fallback_model"] = fallback_model
+        
         st.markdown("---")
         
         # Todoist Configuration  
@@ -413,25 +439,114 @@ Attendees:
                 # Initialize LLM
                 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7, google_api_key=st.session_state["google_api_key"])
                 
-                # Try CrewAI approach first
-                try:
-                    # For CrewAI, we need to create a compatible LLM instance
-                    from crewai import LLM
-                    crewai_llm = LLM(
-                        model="gemini/gemini-1.5-flash",
-                        api_key=st.session_state["google_api_key"]
-                    )
-                    result = run_crewai_analysis(setup, crewai_llm)
+                # Try CrewAI approach first with retry logic
+                max_retries = 3
+                retry_delay = 10  # Start with longer delay for rate limits
+                crewai_success = False
+                
+                for attempt in range(max_retries):
+                    try:
+                        # For CrewAI, we need to create a compatible LLM instance
+                        from crewai import LLM
+                        import time
+                        
+                        # Use primary model for the first attempt, then fallback
+                        model_to_use = st.session_state["primary_model"] if attempt == 0 else st.session_state["fallback_model"]
+                        
+                        # Set environment variable for litellm
+                        os.environ["GOOGLE_API_KEY"] = st.session_state["google_api_key"]
+                        
+                        crewai_llm = LLM(
+                            model=f"gemini/{model_to_use}",
+                            api_key=st.session_state["google_api_key"],
+                            temperature=0.7,
+                            timeout=60  # 60 second timeout
+                        )
+                        
+                        st.info(f"Running CrewAI analysis (attempt {attempt + 1}/{max_retries}) using gemini/{model_to_use}...")
+                        result = run_crewai_analysis(setup, crewai_llm)
+                        
+                        # Debug: Show what we actually got
+                        st.write(f"DEBUG: CrewAI result type: {type(result)}")
+                        if hasattr(result, '__dict__'):
+                            st.write(f"DEBUG: Result attributes: {list(result.__dict__.keys())}")
+                        
+                        # Try different ways to extract content based on result type
+                        if isinstance(result, list) and len(result) >= 3:
+                            context_content = extract_content(result[0])
+                            strategy_content = extract_content(result[1])
+                            brief_content = extract_content(result[2])
+                            crewai_success = True
+                            st.success("CrewAI analysis completed successfully!")
+                            break
+                        elif hasattr(result, 'tasks_output') and len(result.tasks_output) >= 3:
+                            # Handle newer CrewAI format
+                            context_content = extract_content(result.tasks_output[0])
+                            strategy_content = extract_content(result.tasks_output[1])
+                            brief_content = extract_content(result.tasks_output[2])
+                            crewai_success = True
+                            st.success("CrewAI analysis completed successfully!")
+                            break
+                        elif hasattr(result, 'output'):
+                            # Handle single output format - split into parts
+                            full_output = str(result.output)
+                            # Simple split approach - you might need to adjust this
+                            parts = full_output.split('\n\n')
+                            if len(parts) >= 3:
+                                context_content = parts[0]
+                                strategy_content = parts[1] if len(parts) > 1 else "Strategy content not available"
+                                brief_content = parts[2] if len(parts) > 2 else "Brief content not available"
+                                crewai_success = True
+                                st.success("CrewAI analysis completed successfully!")
+                                break
+                        elif isinstance(result, str):
+                            # Handle direct string result
+                            parts = result.split('\n\n')
+                            if len(parts) >= 3:
+                                context_content = parts[0]
+                                strategy_content = parts[1]
+                                brief_content = parts[2]
+                            else:
+                                # Use the full result for all three parts if can't split properly
+                                context_content = result
+                                strategy_content = "Strategy analysis included above"
+                                brief_content = "Executive brief included above"
+                            crewai_success = True
+                            st.success("CrewAI analysis completed successfully!")
+                            break
+                        
+                        # If we get here, the format is unexpected
+                        st.write(f"DEBUG: Full result: {str(result)[:500]}...")  # First 500 chars
+                        raise Exception(f"CrewAI returned unexpected format: {type(result)}")
                     
-                    if isinstance(result, list) and len(result) >= 3:
-                        context_content = extract_content(result[0])
-                        strategy_content = extract_content(result[1])
-                        brief_content = extract_content(result[2])
-                    else:
-                        raise Exception("CrewAI did not return expected format")
-                    
-                except Exception as e:
-                    st.warning(f"Using fallback method. Error: {str(e)}")
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        st.write(f"DEBUG: Exception type: {type(e)}, Message: {str(e)}")
+                        
+                        if "overloaded" in error_msg or "503" in error_msg or "unavailable" in error_msg:
+                            st.warning(f"Model is overloaded (attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay} seconds...")
+                            if attempt < max_retries - 1:  # Don't sleep on last attempt
+                                time.sleep(retry_delay)
+                                retry_delay += 2  # Exponential backoff
+                        elif ("rate limit" in error_msg or "429" in error_msg or 
+                              "quota" in error_msg or "too many requests" in error_msg or
+                              "rate_limit" in error_msg):
+                            st.warning(f"Rate limit hit (attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay} seconds...")
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay)
+                                retry_delay += 5  # Longer delay for rate limits
+                        elif "unexpected format" in error_msg:
+                            # Don't retry format errors, just continue to fallback
+                            st.warning(f"CrewAI format error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                            break  # Exit retry loop for format errors
+                        else:
+                            st.warning(f"CrewAI error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                            if attempt < max_retries - 1:
+                                time.sleep(3)  # Slightly longer delay for unknown errors
+                
+                # If CrewAI failed after all retries, use fallback
+                if not crewai_success:
+                    st.warning("CrewAI failed after all retry attempts. Using fallback method...")
                     context_content, strategy_content, brief_content = fallback_analysis(setup, llm)
                 
                 # Store results
