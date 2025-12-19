@@ -7,7 +7,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
+# Import RetrievalQA with fallback for different langchain versions
+try:
+    from langchain.chains import RetrievalQA
+except ImportError:
+    try:
+        from langchain.chains.retrieval_qa.base import RetrievalQA
+    except ImportError:
+        from langchain.chains.question_answering import RetrievalQA
 from langchain_core.prompts import PromptTemplate
 from crewai import Agent, Task, Crew
 from crewai.process import Process
