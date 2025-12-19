@@ -3,11 +3,12 @@ import os
 import tempfile
 import pandas as pd
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from crewai import Agent, Task, Crew
 from crewai.process import Process
 
@@ -20,8 +21,8 @@ def initialize_session_state():
     defaults = {
         "setup": None,
         "google_api_key": "",
-        "primary_model": "gemini-1.5-flash",
-        "fallback_model": "gemini-1.5-pro",
+        "primary_model": "gemini-2.0-flash-exp",
+        "fallback_model": "gemini-1.5-flash",
         "prepared": False,
         "vectorstore": None,
         "context_analysis": None,
@@ -71,7 +72,12 @@ def create_vectorstore(docs):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
     
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=st.session_state["google_api_key"])
+    # Use HuggingFace embeddings (free, no quota limits, runs locally)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
     return FAISS.from_documents(splits, embeddings)
 
 def run_crewai_analysis(setup, llm):
@@ -221,7 +227,7 @@ def create_qa_chain(vectorstore, api_key):
     
     # Create QA chain
     return RetrievalQA.from_chain_type(
-        llm=ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7, google_api_key=api_key),
+        llm=ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.7, google_api_key=api_key),
         chain_type="stuff",
         retriever=retriever,
         chain_type_kwargs={"prompt": prompt_template},
@@ -318,9 +324,9 @@ def main():
         with st.expander("LLM Configuration"):
             primary_model = st.selectbox(
                 "Primary Model",
-                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+                ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
                 index=0,
-                help="Primary model for CrewAI analysis"
+                help="Primary model for CrewAI analysis (gemini-2.0-flash-exp is fastest and latest)"
             )
             if "primary_model" not in st.session_state:
                 st.session_state["primary_model"] = primary_model
@@ -329,8 +335,8 @@ def main():
             
             fallback_model = st.selectbox(
                 "Fallback Model",
-                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
-                index=1 if len(["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]) > 1 else 0,
+                ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-pro"],
+                index=0,
                 help="Fallback model if primary fails"
             )
             if "fallback_model" not in st.session_state:
@@ -367,6 +373,7 @@ def main():
                 st.session_state["todoist_manager"] = None  # Force reinitialization
         
         st.info("This app helps prepare for meetings by analyzing company info, creating agendas, answering questions, and managing tasks.")
+        st.success("✅ Using free local embeddings (no quota limits!)")
     
     # Main tabs
     tab_setup, tab_results, tab_qa, tab_tasks = st.tabs(["Meeting Setup", "Preparation Results", "Q&A Assistant", "Task Management"])
@@ -437,7 +444,7 @@ Attendees:
                 st.session_state["vectorstore"] = vectorstore
                 
                 # Initialize LLM
-                llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7, google_api_key=st.session_state["google_api_key"])
+                llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.7, google_api_key=st.session_state["google_api_key"])
                 
                 # Try CrewAI approach first with retry logic
                 max_retries = 3
@@ -647,7 +654,7 @@ Attendees:
         else:
             # Initialize Todoist Meeting Manager if not already done
             if st.session_state["todoist_manager"] is None:
-                llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, google_api_key=st.session_state["google_api_key"])
+                llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-exp", temperature=0.3, google_api_key=st.session_state["google_api_key"])
                 st.session_state["todoist_manager"] = TodoistMeetingManager(
                     st.session_state["todoist_api_key"],
                     st.session_state["telegram_bot_token"] if st.session_state["telegram_bot_token"] else None,
